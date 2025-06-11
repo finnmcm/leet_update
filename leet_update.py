@@ -19,7 +19,6 @@ GRAPH_QL = "https://leetcode.com/graphql"
 
 account_sid = os.getenv("TWILIO_ACCOUNT_SID")
 auth_token  = os.getenv("TWILIO_AUTH_TOKEN")
-twilio_num  = os.getenv("TWILIO_PHONE_NUMBER")
 
 client = Client(account_sid, auth_token)
 
@@ -47,8 +46,9 @@ def scrape_leet_sols(username):
 
 def get_user_data(username):
   resp = TABLE.get_item(Key={'username': username})
-  sols = resp.get('problems', {})
-  score = resp.get('score', 0)
+  item = resp.get("Item", {})
+  sols = item.get('problems', {})
+  score = item.get('score', 0)
   return [sols, score]
 
 def update_user_db_sols(username, sols):
@@ -88,6 +88,7 @@ def fetch_new_sols(username):
   for problem in newSols:
     #if problem isn't currently in db, it was solved in the previous day
     if problem not in currSols:
+      print("hi!")
       var = {"titleSlug" : newSols[problem]}
       response = requests.post(
         GRAPH_QL,
@@ -130,6 +131,8 @@ def create_user(username, phoneNumber):
       return False
 
 def update_user_db_score(username, newSols, currScore):
+  if not newSols:
+    return currScore
   points = 0
   for k in newSols:
     if newSols[k] == 'Easy':
@@ -154,53 +157,83 @@ def update_user_db_score(username, newSols, currScore):
     # 'UPDATED_NEW' returns only the attributes that were changed, e.g. {'status': 'shipped'}
   updated_attrs = resp.get('Attributes', {})
   print("Successfully updated user @" + username + "'s score: " , updated_attrs)
+  print(currScore + points)
   return currScore + points
 
 def get_all_users():    
-  keys = []
-  last_evaluated_key = None
+  expr_names = {
+    "#u": "username",
+    "#num": "number"
+  }
+  projection = "#u, #num"
+  response = TABLE.scan(
+  ProjectionExpression=projection,
+  ExpressionAttributeNames=expr_names
+  )
+  items = response.get('Items', [])
+  while 'LastEvaluatedKey' in response:
+    response = TABLE.scan(
+        ProjectionExpression=projection,
+        ExpressionAttributeNames=expr_names,
+        ExclusiveStartKey=response['LastEvaluatedKey']
+    )
+    items.extend(response.get('Items', []))
+  users = []
+  for user in items:
+   users.append((user['username'], user['number']))
+  return users
 
-  while True:
-        try:
-            if last_evaluated_key:
-                resp = TABLE.scan(
-                    ProjectionExpression="#U",
-                    ExpressionAttributeNames={
-                        "#U": "username",
-                    },
-                    ExclusiveStartKey=last_evaluated_key
-                )
-            else:
-                resp = TABLE.scan(
-                    ProjectionExpression="#U",
-                    ExpressionAttributeNames={
-                        "#U": "username",
-                    }
-                )
-        except ClientError as e:
-            print("Failed to retrieve usernames:", e.response['Error']['Message'])
-            return []
-        item = resp.get('Items', [])
-        keys.extend(item)
-        last_evaluated_key = resp.get('LastEvaluatedKey')
-        if not last_evaluated_key:
-            break
-  parsedUsernames = [key['username'] for key in keys]
-  return parsedUsernames
+def build_scoreboard(username, newUserSolutions, userScores):
+  s = "Hi, @" + username + "! Here's your daily LeetUpdate digest: \n\n"
+  sortedScores = sorted(userScores.items(), key=lambda kv: kv[1], reverse=True)
+  if not newUserSolutions:
+    s += "You didn't solve any problems yesterday. Lock in and make it happen today.\n\n"
+  else:
+    s += "You solved " + str(len(newUserSolutions)) + " problems yesterday! Nice work.\n\n"
+    
+  s += "Here's the current LeetUpdate scoreboard: \n"
+  currUserPosition = -1
+  for (pos, user) in enumerate(sortedScores):
+    if user[0] == username:
+      currUserPosition = pos+1
+    line = str(pos+1) + ". " + "@" + user[0] + ": " + str(user[1]) + " points\n"
+    s += line
+  s += "\n"
 
-def send_scoreboard():
-  pass    
+  if currUserPosition == 1:
+    line = "You're currently in 1st place. Keep it up and stay on top today!"
+  elif currUserPosition == 2:
+    line = "You're currently in 2nd place. Solve some problems today and take that #1 spot!"
+  else:
+    line = "You're currently in " + str(currUserPosition) + "th place. Solve some problems today and close the gap!"
+  s += line
+  return s
+  
+    
+  
       
 def run_lambda():
   # MAIN DAILY RUN FUNCTION TO UPDATE SCOREBOARD, TEXT USERS
-  totalUserSolutions = {}
+  newUserSolutions = {}
   userScores = {}
   users = get_all_users()
   for user in users:
-    currScore, solvedProblems = fetch_new_sols(user)
-    totalUserSolutions[user] = solvedProblems
+    currScore, solvedProblems = fetch_new_sols(user[0])
+    newUserSolutions[user[0]] = solvedProblems
     newScore = update_user_db_score(user, solvedProblems, currScore)
-    userScores[user] = newScore
+    userScores[user[0]] = newScore
+  
+  for user in users:
+    message = build_scoreboard(user[0], newUserSolutions=newUserSolutions[user[0]], userScores=userScores)
+    phoneNumber = "+" + user[1]
+    client.messages.create(
+    body=message,
+    from_="+14433329581",
+    to=phoneNumber
+    )
+  
+
+
     
 def lambda_handler(event, context):
   run_lambda()
@@ -220,15 +253,18 @@ def lambda_handler(event, context):
       newScore = update_user_db_score(user, solvedProblems, currScore)
      userScores[user] = newScore
     '''
+newUserSolutions = {}
+userScores = {}
+users = get_all_users()
+for user in users:
+  currScore, solvedProblems = fetch_new_sols(user[0])
+  newUserSolutions[user[0]] = solvedProblems
+  newScore = update_user_db_score(user[0], solvedProblems, currScore)
+  userScores[user[0]] = newScore
+    
 #lambda_handler(None, None)
-print(account_sid)
-print(auth_token)
-'''
-message = client.messages.create(
-    body="Hello from Twilio!",
-    from_="+14151234567",
-    to="+16176506561"
-)
-print(message.sid)
-'''
+#print(get_all_users())
+#print(build_scoreboard("finnmcm", ["Container with Most Water", "Two-sum"], {"finnmcm": 12, "zakuism": 9}))
+  
+
   
